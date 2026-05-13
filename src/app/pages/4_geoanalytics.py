@@ -4,15 +4,13 @@ import plotly.express as px
 from streamlit_autorefresh import st_autorefresh
 
 from src.app.load_css import load_css
-from src.database.mongo_client import get_database
+from src.database.redis_client import redis_client
 from src.utils.formatters import numero_br, nome_combustivel
 from src.app.components import render_update_status
 
 
 load_css()
 st_autorefresh(interval=5000, key="geo_demand_refresh")
-
-db = get_database()
 
 st.markdown(
     '<h1 class="main-title">Geo & Demand Intelligence</h1>',
@@ -22,104 +20,91 @@ st.markdown(
 render_update_status(5)
 
 st.markdown(
-    '<p class="sub-title">Cobertura geográfica dos postos, hotzones de busca e consultas sensíveis à latência</p>',
+    '<p class="sub-title">Cobertura geográfica, hotzones de busca e demanda regional servidas pelo Redis</p>',
     unsafe_allow_html=True
 )
 
 
 # =========================================================
-# DATA LOAD
+# HELPERS REDIS
 # =========================================================
 
-postos = list(db.postos.find().limit(3000))
-buscas = list(db.buscas_usuarios.find())
+def carregar_postos_geo() -> pd.DataFrame:
+    membros = redis_client.zrange("postos_geo", 0, -1)
 
-if not postos:
-    st.warning("Aguardando dados de postos...")
-    st.stop()
+    registros = []
+
+    for posto_id in membros:
+        posicao = redis_client.geopos("postos_geo", posto_id)
+        posto = redis_client.hgetall(f"posto:{posto_id}")
+
+        if not posicao or not posicao[0] or not posto:
+            continue
+
+        longitude, latitude = posicao[0]
+
+        registros.append({
+            "Posto": posto.get("nome_fantasia", "Não informado"),
+            "Bandeira": posto.get("bandeira", "Não informado"),
+            "Bairro": posto.get("bairro", "Não informado"),
+            "Cidade": posto.get("cidade", "Não informado"),
+            "UF": posto.get("estado", "Não informado"),
+            "Latitude": float(latitude),
+            "Longitude": float(longitude),
+        })
+
+    df = pd.DataFrame(registros)
+
+    if not df.empty:
+        df = df[
+            (df["Latitude"].between(-33.8, 5.3)) &
+            (df["Longitude"].between(-73.5, -34.8))
+        ]
+
+    return df
+
+
+def carregar_zset(chave: str, inicio: int = 0, fim: int = 19) -> pd.DataFrame:
+    dados = redis_client.zrevrange(
+        chave,
+        inicio,
+        fim,
+        withscores=True
+    )
+
+    return pd.DataFrame(
+        dados,
+        columns=["nome", "volume"]
+    )
 
 
 # =========================================================
-# POSTOS / MAPA
+# DATA LOAD — REDIS SERVING LAYER
 # =========================================================
 
-dados_postos = []
+metricas = redis_client.hgetall("metricas:overview")
 
-for posto in postos:
-    geo = posto.get("location", {}).get("coordinates")
+df_postos = carregar_postos_geo()
 
-    if not geo or len(geo) != 2:
-        continue
-
-    longitude = geo[0]
-    latitude = geo[1]
-
-    dados_postos.append({
-        "Latitude": latitude,
-        "Longitude": longitude,
-        "Posto": posto.get("nome_fantasia", "Não informado"),
-        "Cidade": posto.get("endereco", {}).get("cidade", "Não informado"),
-        "UF": posto.get("endereco", {}).get("estado", "Não informado"),
-        "Bandeira": posto.get("bandeira", "Não informado"),
-        "Bairro": posto.get("endereco", {}).get("bairro", "Não informado"),
-    })
-
-df_postos = pd.DataFrame(dados_postos)
-
-df_postos = df_postos[
-    (df_postos["Latitude"].between(-33.8, 5.3)) &
-    (df_postos["Longitude"].between(-73.5, -34.8))
-]
+df_bairros = carregar_zset("buscas:bairros", 0, 19)
+df_combustiveis = carregar_zset("buscas:combustiveis", 0, 10)
+df_regioes = carregar_zset("buscas:regioes", 0, 10)
 
 if df_postos.empty:
-    st.warning("Nenhuma coordenada válida encontrada dentro do Brasil.")
+    st.warning("Aguardando dados geográficos processados no Redis...")
     st.stop()
 
+total_buscas = int(float(metricas.get("total_buscas", 0))) if metricas else 0
 
-# =========================================================
-# BUSCAS / DEMANDA
-# =========================================================
-
-if buscas:
-    df_buscas = pd.DataFrame(buscas)
-
-    if "bairro" not in df_buscas.columns:
-        df_buscas["bairro"] = df_buscas["cidade"]
-
-    df_buscas["Combustível"] = df_buscas["tipo_combustivel"].apply(nome_combustivel)
-
-    df_buscas["Região"] = (
-        df_buscas["bairro"].astype(str)
-        + " • "
-        + df_buscas["cidade"].astype(str)
-        + " - "
-        + df_buscas["estado"].astype(str)
-    )
-
-    total_buscas = df_buscas["resultado_count"].sum()
-
-    bairro_top = (
-        df_buscas.groupby("Região", as_index=False)["resultado_count"]
-        .sum()
-        .sort_values("resultado_count", ascending=False)
-        .iloc[0]
-    )
-
-    comb_top = (
-        df_buscas.groupby("Combustível", as_index=False)["resultado_count"]
-        .sum()
-        .sort_values("resultado_count", ascending=False)
-        .iloc[0]
-    )
-
-    latencia_media = df_buscas["latencia_ms"].mean()
-
+if not df_bairros.empty:
+    bairro_top = df_bairros.iloc[0]
 else:
-    df_buscas = pd.DataFrame()
-    total_buscas = 0
     bairro_top = None
+
+if not df_combustiveis.empty:
+    comb_top = df_combustiveis.iloc[0]
+else:
     comb_top = None
-    latencia_media = 0
 
 
 # =========================================================
@@ -134,9 +119,9 @@ with k1:
         <div class="kpi-label">Postos no mapa</div>
         <div class="kpi-value">{numero_br(len(df_postos))}</div>
         <div class="kpi-detail">
-            Postos com coordenadas válidas dentro do Brasil.
+            Postos recuperados via Redis GEO e HASH.
         </div>
-        <div class="kpi-tag">cobertura</div>
+        <div class="kpi-tag">redis geo</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -146,9 +131,9 @@ with k2:
         <div class="kpi-label">Estados cobertos</div>
         <div class="kpi-value">{numero_br(df_postos["UF"].nunique())}</div>
         <div class="kpi-detail">
-            UFs identificadas na base geográfica.
+            UFs identificadas na camada de serving.
         </div>
-        <div class="kpi-tag">geo</div>
+        <div class="kpi-tag">cobertura</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -158,21 +143,24 @@ with k3:
         <div class="kpi-label">Volume total de buscas</div>
         <div class="kpi-value">{numero_br(total_buscas)}</div>
         <div class="kpi-detail">
-            Soma dos resultados retornados nas consultas.
+            Total consolidado no Redis a partir do MongoDB.
         </div>
         <div class="kpi-tag">demanda</div>
     </div>
     """, unsafe_allow_html=True)
 
 with k4:
+    top_texto = nome_combustivel(comb_top["nome"]) if comb_top is not None else "N/I"
+    top_volume = numero_br(int(comb_top["volume"])) if comb_top is not None else "0"
+
     st.markdown(f"""
     <div class="kpi-grid-card">
-        <div class="kpi-label">Latência média</div>
-        <div class="kpi-value">{latencia_media:.0f} ms</div>
+        <div class="kpi-label">Produto mais buscado</div>
+        <div class="kpi-value">{top_texto}</div>
         <div class="kpi-detail">
-            Indicador usado para priorizar serving em Redis.
+            Volume consolidado: {top_volume} buscas.
         </div>
-        <div class="kpi-tag">performance</div>
+        <div class="kpi-tag">hot product</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -180,7 +168,7 @@ st.markdown("<br>", unsafe_allow_html=True)
 
 
 # =========================================================
-# MAPA + TOP 5
+# MAPA + TOP 5 BAIRROS
 # =========================================================
 
 col_map, col_cards = st.columns([1.4, 1])
@@ -284,68 +272,45 @@ with col_map:
 with col_cards:
     st.subheader("🔥 Top 5 bairros por buscas")
 
-    if not df_buscas.empty:
-        top_bairros = (
-            df_buscas.groupby(["bairro", "cidade", "estado"], as_index=False)["resultado_count"]
-            .sum()
-            .sort_values("resultado_count", ascending=False)
-            .head(5)
-            .reset_index(drop=True)
-        )
+    if not df_bairros.empty:
+        top_5 = df_bairros.head(5).reset_index(drop=True)
 
-        for idx, row in top_bairros.iterrows():
+        for idx, row in top_5.iterrows():
             st.markdown(f"""
             <div class="rank-card">
                 <div class="info-group">
-                    <div class="rank-nome">#{idx + 1} • {row["bairro"]}</div>
-                    <div class="rank-meta">{row["cidade"]} - {row["estado"]}</div>
+                    <div class="rank-nome">#{idx + 1} • {row["nome"]}</div>
+                    <div class="rank-meta">Volume consolidado via Redis Sorted Set</div>
                     <div class="badge" style="background:#dcfce7;color:#166534;">alta demanda</div>
                 </div>
-                <div class="rank-price">{numero_br(row["resultado_count"])}</div>
+                <div class="rank-price">{numero_br(int(row["volume"]))}</div>
             </div>
             """, unsafe_allow_html=True)
     else:
-        st.info("Aguardando dados de buscas.")
+        st.info("Aguardando dados de buscas no Redis.")
 
 
 # =========================================================
-# TOP 20 REGIÕES
+# TOP 20 BAIRROS
 # =========================================================
 
-if not df_buscas.empty:
+if not df_bairros.empty:
     st.markdown("---")
 
-    st.subheader("📊 Top 20 regiões por volume de buscas")
+    st.subheader("📊 Top 20 bairros por volume de buscas")
 
-    demanda_regiao = (
-        df_buscas.groupby(["bairro","cidade" ,"estado"], as_index=False)
-        .agg(
-            resultado_count=("resultado_count", "sum"),
-            consultas=("session_id", "count"),
-            latencia_media=("latencia_ms", "mean")
-        )
-        .sort_values("resultado_count", ascending=False)
-        .head(20)
-        .reset_index(drop=True)
+    demanda_bairro = df_bairros.copy()
+    demanda_bairro["Volume formatado"] = demanda_bairro["volume"].apply(
+        lambda x: numero_br(int(x))
     )
-
-    demanda_regiao["Região"] = (
-        demanda_regiao["bairro"].astype(str)
-        + " - "
-        + demanda_regiao["cidade"].astype(str)
-        + " - "
-        + demanda_regiao["estado"].astype(str)
-    )
-
-    demanda_regiao["Volume formatado"] = demanda_regiao["resultado_count"].apply(numero_br)
 
     fig_buscas = px.bar(
-        demanda_regiao,
-        x="Região",
-        y="resultado_count",
-        color="resultado_count",
+        demanda_bairro,
+        x="nome",
+        y="volume",
+        color="volume",
         text="Volume formatado",
-        title="Regiões com maior intenção de busca",
+        title="Bairros com maior intenção de busca",
         color_continuous_scale=[
             [0.0, "#dcfce7"],
             [0.25, "#86efac"],
@@ -354,12 +319,8 @@ if not df_buscas.empty:
             [1.0, "#052e16"],
         ],
         hover_data={
-            "Região": True,
-            "resultado_count": True,
-            "consultas": True,
-            "latencia_media": ":.0f",
-            "cidade": False,
-            "estado": False,
+            "nome": True,
+            "volume": True,
             "Volume formatado": False,
         }
     )
@@ -373,16 +334,15 @@ if not df_buscas.empty:
 
     fig_buscas.update_layout(
         template="plotly_dark",
-        height=560,
-        margin=dict(l=0, r=20, t=60, b=130),
+        height=580,
+        margin=dict(l=0, r=20, t=60, b=160),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        xaxis_title="Região",
+        xaxis_title="Bairro / Cidade - UF",
         yaxis_title="Volume de buscas",
         coloraxis_showscale=False,
         xaxis_tickangle=-40,
         bargap=0.26,
-        barmode="relative",
         font=dict(color="#e5e7eb"),
         title=dict(
             font=dict(size=16, color="#f8fafc")
@@ -391,7 +351,7 @@ if not df_buscas.empty:
 
     fig_buscas.update_xaxes(
         categoryorder="array",
-        categoryarray=demanda_regiao["Região"].tolist(),
+        categoryarray=demanda_bairro["nome"].tolist(),
         showgrid=False
     )
 
@@ -404,94 +364,79 @@ if not df_buscas.empty:
     st.plotly_chart(fig_buscas, use_container_width=True)
 
 
-    # =====================================================
-    # INSIGHTS
-    # =====================================================
+# =========================================================
+# INSIGHTS
+# =========================================================
 
-    st.markdown("---")
+st.markdown("---")
 
-    st.subheader("📑 Insights executivos de demanda")
+st.subheader("📑 Insights executivos de demanda")
 
-    i1, i2, i3 = st.columns(3)
+i1, i2, i3 = st.columns(3)
 
-    with i1:
-        st.markdown(f"""
-        <div class="insight-card">
-            <div class="insight-title">📍 Hotzone regional</div>
-            <p class="insight-text">
-                <strong>{bairro_top["Região"]}</strong> concentra o maior volume de buscas.
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
+with i1:
+    hotzone = bairro_top["nome"] if bairro_top is not None else "Não disponível"
+    hotzone_volume = int(bairro_top["volume"]) if bairro_top is not None else 0
 
-    with i2:
-        st.markdown(f"""
-        <div class="insight-card">
-            <div class="insight-title">⛽ Produto de maior interesse</div>
-            <p class="insight-text">
-                <strong>{comb_top["Combustível"]}</strong> lidera a intenção de busca dos usuários.
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
+    st.markdown(f"""
+    <div class="insight-card">
+        <div class="insight-title">📍 Hotzone regional</div>
+        <p class="insight-text">
+            <strong>{hotzone}</strong> concentra o maior volume de buscas,
+            com <strong>{numero_br(hotzone_volume)}</strong> ocorrências.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
 
-    with i3:
-        st.markdown("""
-        <div class="insight-card">
-            <div class="insight-title">⚡ Serving Layer</div>
-            <p class="insight-text">
-                Buscas por bairro, combustível e proximidade são candidatas naturais para Redis GEO e Redis Sorted Sets.
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
+with i2:
+    produto = nome_combustivel(comb_top["nome"]) if comb_top is not None else "Não disponível"
+    produto_volume = int(comb_top["volume"]) if comb_top is not None else 0
+
+    st.markdown(f"""
+    <div class="insight-card">
+        <div class="insight-title">⛽ Produto de maior interesse</div>
+        <p class="insight-text">
+            <strong>{produto}</strong> lidera a intenção de busca,
+            com <strong>{numero_br(produto_volume)}</strong> registros.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+with i3:
+    st.markdown("""
+    <div class="insight-card">
+        <div class="insight-title">⚡ Serving Layer</div>
+        <p class="insight-text">
+            Buscas por bairro, produto e região são consolidadas em Redis Sorted Sets para leitura rápida.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
 
 
-    # =====================================================
-    # TABELA
-    # =====================================================
+# =========================================================
+# TABELA
+# =========================================================
 
-    st.subheader("📋 Tabela executiva de buscas")
+st.subheader("📋 Tabela executiva de buscas por bairro")
 
-    tabela_buscas = (
-        df_buscas.groupby(["bairro", "cidade", "estado", "Combustível"], as_index=False)
-        .agg(
-            volume_buscas=("resultado_count", "sum"),
-            latencia_media=("latencia_ms", "mean"),
-            sessoes=("session_id", "count")
-        )
-        .sort_values("volume_buscas", ascending=False)
-    )
+tabela_buscas = df_bairros.copy()
 
-    tabela_buscas["Volume de buscas"] = tabela_buscas["volume_buscas"].apply(numero_br)
+tabela_buscas["Volume de buscas"] = tabela_buscas["volume"].apply(
+    lambda x: numero_br(int(x))
+)
 
-    tabela_buscas["Latência média"] = (
-        tabela_buscas["latencia_media"]
-        .round(0)
-        .astype(int)
-        .astype(str)
-        + " ms"
-    )
+tabela_buscas = tabela_buscas.rename(columns={
+    "nome": "Bairro / Região"
+})
 
-    tabela_buscas["Sessões"] = tabela_buscas["sessoes"].apply(numero_br)
+tabela_buscas = tabela_buscas[[
+    "Bairro / Região",
+    "Volume de buscas"
+]]
 
-    tabela_buscas = tabela_buscas.rename(columns={
-        "bairro": "Bairro",
-        "cidade": "Cidade",
-        "estado": "UF"
-    })
-
-    tabela_buscas = tabela_buscas[[
-        "Bairro",
-        "Cidade",
-        "UF",
-        "Combustível",
-        "Volume de buscas",
-        "Latência média",
-        "Sessões"
-    ]]
-
-    st.dataframe(
-        tabela_buscas.head(120),
-        use_container_width=True,
-        height=620,
-        hide_index=True
-    )
+st.dataframe(
+    tabela_buscas.head(120),
+    use_container_width=True,
+    height=620,
+    hide_index=True
+)

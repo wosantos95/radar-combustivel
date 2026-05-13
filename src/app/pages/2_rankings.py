@@ -194,81 +194,118 @@ with col_right:
 
     if combustivel == "TODOS":
         comparativo = (
-            df.groupby("Combustível")
+            df.groupby("Combustível", as_index=False)
             .agg(
                 menor_preco=("Preço", "min"),
                 preco_medio=("Preço", "mean"),
                 maior_preco=("Preço", "max"),
                 postos=("Posto", "count")
             )
-            .reset_index()
             .sort_values("preco_medio", ascending=False)
+            .reset_index(drop=True)
         )
 
-        fig = px.scatter(
+        comparativo["Preço médio"] = comparativo["preco_medio"].apply(moeda_brl)
+
+        fig = px.bar(
             comparativo,
-            x="Combustível",
-            y="preco_medio",
-            size="postos",
+            x="preco_medio",
+            y="Combustível",
+            orientation="h",
             color="preco_medio",
-            color_continuous_scale="reds",
+            text="Preço médio",
+            color_continuous_scale=[
+                [0.0, "#fee2e2"],
+                [0.35, "#fb7185"],
+                [0.70, "#ef4444"],
+                [1.0, "#7f1d1d"],
+            ],
             hover_data={
                 "menor_preco": ":.2f",
                 "preco_medio": ":.2f",
                 "maior_preco": ":.2f",
                 "postos": True,
+                "Preço médio": False,
             },
             title="Preço médio por combustível"
         )
 
         fig.update_layout(
-            xaxis_title="Combustível",
-            yaxis_title="Preço médio em R$",
+            xaxis_title="Preço médio em R$",
+            yaxis_title="Combustível",
             coloraxis_colorbar_title="Preço médio"
+        )
+
+        fig.update_yaxes(
+            categoryorder="array",
+            categoryarray=comparativo["Combustível"].tolist()
         )
 
     else:
         comparativo = (
-            df.groupby("UF")
+            df.groupby("UF", as_index=False)
             .agg(
                 menor_preco=("Preço", "min"),
                 preco_medio=("Preço", "mean"),
                 maior_preco=("Preço", "max"),
                 postos=("Posto", "count")
             )
-            .reset_index()
             .sort_values("preco_medio", ascending=False)
+            .reset_index(drop=True)
         )
 
-        fig = px.scatter(
+        comparativo["Preço médio"] = comparativo["preco_medio"].apply(moeda_brl)
+
+        fig = px.bar(
             comparativo,
-            x="UF",
-            y="preco_medio",
-            size="postos",
+            x="preco_medio",
+            y="UF",
+            orientation="h",
             color="preco_medio",
-            color_continuous_scale="reds",
+            text="Preço médio",
+            color_continuous_scale=[
+                [0.0, "#fee2e2"],
+                [0.35, "#fb7185"],
+                [0.70, "#ef4444"],
+                [1.0, "#7f1d1d"],
+            ],
             hover_data={
                 "menor_preco": ":.2f",
                 "preco_medio": ":.2f",
                 "maior_preco": ":.2f",
                 "postos": True,
+                "Preço médio": False,
             },
-            title="Preço médio por combustível"
+            title=f"Preço médio por UF — {nome_combustivel(combustivel)}"
         )
 
         fig.update_layout(
-            xaxis_title="UF",
-            yaxis_title="Preço médio em R$",
+            xaxis_title="Preço médio em R$",
+            yaxis_title="UF",
             coloraxis_colorbar_title="Preço médio"
         )
+
+        fig.update_yaxes(
+            categoryorder="array",
+            categoryarray=comparativo["UF"].tolist()
+        )
+
+    fig.update_traces(
+        textposition="outside",
+        cliponaxis=False,
+        marker_line_width=0,
+        opacity=0.96
+    )
 
     fig.update_layout(
         template="plotly_dark",
         height=430,
-        margin=dict(l=0, r=30, t=50, b=0),
+        margin=dict(l=0, r=40, t=50, b=0),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         font=dict(color="#e5e7eb"),
+        coloraxis_showscale=False,
+        bargap=0.28
     )
 
     fig.update_xaxes(
@@ -278,8 +315,7 @@ with col_right:
     )
 
     fig.update_yaxes(
-        showgrid=True,
-        gridcolor="rgba(148,163,184,0.12)",
+        showgrid=False,
         zeroline=False
     )
 

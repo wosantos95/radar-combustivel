@@ -1,11 +1,12 @@
+import json
+
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from pymongo import DESCENDING
 from streamlit_autorefresh import st_autorefresh
 
 from src.app.load_css import load_css
-from src.database.mongo_client import get_database
+from src.database.redis_client import redis_client
 from src.utils.formatters import (
     moeda_brl,
     percentual,
@@ -19,8 +20,6 @@ from src.app.components import render_update_status
 load_css()
 st_autorefresh(interval=5000, key="realtime_refresh")
 
-db = get_database()
-
 st.markdown(
     '<h1 class="main-title">Real-Time Operations</h1>',
     unsafe_allow_html=True,
@@ -29,29 +28,63 @@ st.markdown(
 render_update_status(5)
 
 st.markdown(
-    '<p class="sub-title">Monitoramento executivo das alterações de preço e consultas críticas de baixa latência</p>',
+    '<p class="sub-title">Monitoramento executivo das alterações de preço servidas pelo Redis</p>',
     unsafe_allow_html=True,
 )
 
 
 # =========================================================
-# DATA LOAD
+# DATA LOAD — REDIS SERVING LAYER
 # =========================================================
 
-eventos = list(
-    db.eventos_preco.find()
-    .sort("ocorrido_em", DESCENDING)
-    .limit(500)
-)
+eventos_redis = redis_client.lrange("eventos:recentes", 0, 499)
 
-if not eventos:
-    st.warning("Aguardando eventos...")
+if not eventos_redis:
+    st.warning("Aguardando eventos processados no Redis...")
     st.stop()
 
-df = pd.DataFrame(eventos)
+dados = []
+
+for item in eventos_redis:
+    try:
+        dados.append(json.loads(item))
+    except Exception:
+        continue
+
+df = pd.DataFrame(dados)
+
+if df.empty:
+    st.warning("Eventos recentes ainda não disponíveis no Redis.")
+    st.stop()
+
+
+# =========================================================
+# DATA QUALITY / FORMAT
+# =========================================================
+
+df["preco_anterior"] = pd.to_numeric(
+    df["preco_anterior"],
+    errors="coerce"
+).fillna(0)
+
+df["preco_novo"] = pd.to_numeric(
+    df["preco_novo"],
+    errors="coerce"
+).fillna(0)
+
+df["variacao_pct"] = pd.to_numeric(
+    df["variacao_pct"],
+    errors="coerce"
+).fillna(0)
+
+df["ocorrido_em"] = pd.to_datetime(
+    df["ocorrido_em"],
+    errors="coerce"
+)
+
+df = df.dropna(subset=["ocorrido_em"])
 
 df["Combustível"] = df["combustivel"].apply(nome_combustivel)
-df["ocorrido_em"] = pd.to_datetime(df["ocorrido_em"])
 
 maior_alta = df["variacao_pct"].max()
 maior_queda = df["variacao_pct"].min()
@@ -74,7 +107,7 @@ st.markdown("<br>", unsafe_allow_html=True)
 
 
 # =========================================================
-# TOP VARIAÇÕES + LINHA POR HORA
+# TOP VARIAÇÕES + LINHA POR MINUTO
 # =========================================================
 
 col_left, col_right = st.columns([1, 1.35])
@@ -97,7 +130,7 @@ with col_left:
                     {moeda_brl(row["preco_anterior"])} → {moeda_brl(row["preco_novo"])}
                     • Fonte: {row["fonte"]}
                 </div>
-                <div class="badge" style="{badge_style(row["combustivel"])}">evento crítico</div>
+                <div class="badge" style="{badge_style(row["combustivel"])}">redis realtime</div>
             </div>
             <div class="rank-price">{percentual(row["variacao_pct"])}</div>
         </div>
@@ -107,10 +140,6 @@ with col_right:
     st.subheader("📈 Preço médio por minuto")
 
     df_tempo = df.copy()
-
-    # =====================================================
-    # AGREGAÇÃO POR MINUTO
-    # =====================================================
 
     df_tempo["Minuto"] = (
         df_tempo["ocorrido_em"]
@@ -125,10 +154,6 @@ with col_right:
         .mean()
         .sort_values("Minuto")
     )
-
-    # =====================================================
-    # GRÁFICO
-    # =====================================================
 
     fig = px.line(
         tendencia_tempo,
@@ -158,19 +183,13 @@ with col_right:
     fig.update_layout(
         height=500,
         margin=dict(l=0, r=0, t=55, b=20),
-
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-
         xaxis_title="Minuto do evento",
         yaxis_title="Preço médio em R$",
-
         legend_title_text="Combustível",
-
         hovermode="x unified",
-
         font=dict(color="#e5e7eb"),
-
         title=dict(
             font=dict(
                 size=18,
@@ -181,7 +200,7 @@ with col_right:
 
     fig.update_xaxes(
         showgrid=False,
-        tickformat="%H:%M\n%d/%m"
+        tickformat="%H:%M<br>%d/%m"
     )
 
     fig.update_yaxes(
@@ -196,7 +215,7 @@ with col_right:
     )
 
     st.info(
-        "Visualização agregada por minuto com base nos eventos processados em tempo real."
+        "Visualização agregada por minuto com base nos eventos servidos pelo Redis."
     )
 
 
@@ -325,7 +344,7 @@ consultas = [
     {
         "nome": "Últimas alterações",
         "desc": "Eventos recentes de mudança de preço.",
-        "estrutura": "Redis TimeSeries",
+        "estrutura": "Redis LIST + TimeSeries",
         "criticidade": "Alta",
     },
 ]
