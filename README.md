@@ -43,19 +43,52 @@ Dashboard Streamlit
 
 ```text
 radar-combustivel/
+│
 ├── docker-compose.yml
 ├── Dockerfile
 ├── requirements.txt
+├── .dockerignore
 ├── .env
 ├── README.md
 │
-├── src/
-│   ├── app/
-│   ├── database/
-│   ├── generator/
-│   ├── pipeline/
-│   └── utils/
-```
+├── logs/
+│
+└── src/
+    │
+    ├── app/
+    │   │
+    │   ├── app.py
+    │   ├── load_css.py
+    │   ├── components.py
+    │   │
+    │   ├── pages/
+    │   │   │
+    │   │   ├── 1_overview.py
+    │   │   ├── 2_rankings.py
+    │   │   ├── 3_realtime.py
+    │   │   └── 4_geoanalytics.py
+    │   │
+    │   └── styles/
+    │       │
+    │       └── theme.css
+    │
+    ├── database/
+    │   │
+    │   ├── mongo_client.py
+    │   └── redis_client.py
+    │
+    ├── generator/
+    │   │
+    │   └── fake_generator.py
+    │
+    ├── pipeline/
+    │   │
+    │   └── mongo_to_redis.py
+    │
+    └── utils/
+        │
+        ├── logger.py
+        └── formatters.py
 
 ---
 
@@ -63,12 +96,19 @@ radar-combustivel/
 
 ```env
 MONGO_URI=mongodb://mongodb:27017
-
 DATABASE_NAME=radar_combustivel
 
 REDIS_HOST=redis
-
 REDIS_PORT=6379
+REDIS_DB=0
+
+STREAMLIT_SERVER_PORT=8501
+
+PIPELINE_BATCH_SIZE=500
+PIPELINE_SLEEP_SECONDS=2
+
+FAKE_STREAM_INTERVAL=2
+FAKE_INITIAL_LOAD=10000
 ```
 
 ---
