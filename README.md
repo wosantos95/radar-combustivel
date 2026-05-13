@@ -89,8 +89,7 @@ radar-combustivel/
         │
         ├── logger.py
         └── formatters.py
-
----
+```
 
 # ⚙️ Variáveis de Ambiente
 
@@ -109,6 +108,7 @@ PIPELINE_SLEEP_SECONDS=2
 
 FAKE_STREAM_INTERVAL=2
 FAKE_INITIAL_LOAD=10000
+
 ```
 
 ---
