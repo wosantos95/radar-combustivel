@@ -125,7 +125,7 @@ radar-combustivel/
 ├── Dockerfile
 ├── requirements.txt
 ├── .dockerignore
-├── .env.example
+├── .env
 ├── README.md
 │
 ├── logs/
@@ -513,7 +513,7 @@ metricas:overview
 
 ## ⚙️ Variáveis de Ambiente
 
-Crie um arquivo `.env` a partir do `.env.example`.
+Crie um arquivo `.env` a partir do `.env`.
 
 Arquivo recomendado:
 
@@ -608,7 +608,7 @@ cd radar-combustivel
 Crie o arquivo `.env`:
 
 ```bash
-cp .env.example .env
+cp .env .env
 ```
 
 Suba a aplicação:
@@ -631,112 +631,6 @@ Redis Insight:
 
 ```text
 http://localhost:8001
-```
-
-MongoDB:
-
-```text
-localhost:27017
-```
-
-Redis:
-
-```text
-localhost:6379
-```
-
----
-
-## 🧪 Validação do Redis
-
-Entre no Redis CLI:
-
-```bash
-docker exec -it radar-redis redis-cli
-```
-
-Validar rankings:
-
-```redis
-KEYS ranking:*
-```
-
-Validar métricas executivas:
-
-```redis
-HGETALL metricas:overview
-```
-
-Validar eventos recentes:
-
-```redis
-LRANGE eventos:recentes 0 3
-```
-
-Validar buscas por combustível:
-
-```redis
-ZREVRANGE buscas:combustiveis 0 5 WITHSCORES
-```
-
-Validar buscas por bairro:
-
-```redis
-ZREVRANGE buscas:bairros 0 5 WITHSCORES
-```
-
-Validar dados geográficos:
-
-```redis
-ZRANGE postos_geo 0 5
-```
-
-Validar status do pipeline:
-
-```redis
-HGETALL pipeline:status
-```
-
-Validar histórico TimeSeries:
-
-```redis
-KEYS historico:*
-```
-
----
-
-## 🔎 Exemplo de Validação Esperada
-
-### Rankings
-
-```text
-ranking:GASOLINA_COMUM
-ranking:DIESEL_S10
-ranking:GNV
-ranking:DIESEL_COMUM
-ranking:ETANOL
-ranking:GASOLINA_ADITIVADA
-```
-
-### Métricas
-
-```text
-total_postos
-total_eventos
-total_buscas
-preco_medio
-menor_preco
-maior_preco
-atualizado_em
-```
-
-### Pipeline
-
-```text
-status: online
-eventos_processados_ultimo_ciclo: 10
-batch_size: 500
-sleep_seconds: 2
 ```
 
 ---
