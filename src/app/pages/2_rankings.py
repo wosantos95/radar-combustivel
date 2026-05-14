@@ -5,7 +5,13 @@ from streamlit_autorefresh import st_autorefresh
 
 from src.app.load_css import load_css
 from src.database.redis_client import redis_client
-from src.utils.formatters import moeda_brl, nome_combustivel, badge_style, percentual, numero_br
+from src.utils.formatters import (
+    moeda_brl,
+    nome_combustivel,
+    badge_style,
+    percentual,
+    numero_br,
+)
 from src.app.components import render_update_status
 
 
@@ -20,7 +26,6 @@ st.markdown(
 
 render_update_status(10)
 
-
 st.markdown(
     '<p class="sub-title">Menores preços por produto e região servidos pelo Redis Sorted Set</p>',
     unsafe_allow_html=True
@@ -34,14 +39,8 @@ combustiveis = [
     "ETANOL",
     "DIESEL_S10",
     "DIESEL_COMUM",
-    "GNV"
+    "GNV",
 ]
-
-combustivel = st.sidebar.selectbox(
-    "Produto",
-    combustiveis,
-    format_func=nome_combustivel
-)
 
 
 def carregar_ranking(produto: str) -> pd.DataFrame:
@@ -67,12 +66,17 @@ def carregar_ranking(produto: str) -> pd.DataFrame:
             if not posto:
                 continue
 
+            bairro = posto.get("bairro", "Não informado")
+            cidade = posto.get("cidade", "Não informado")
+            uf = posto.get("estado", "Não informado")
+
             registros.append({
                 "Posto": posto.get("nome_fantasia", "Não informado"),
                 "Bandeira": posto.get("bandeira", "Não informado"),
-                "Cidade": posto.get("cidade", "Não informado"),
-                "UF": posto.get("estado", "Não informado"),
-                "Região": f"{posto.get('cidade', 'N/I')} - {posto.get('estado', 'N/I')}",
+                "Bairro": bairro,
+                "Cidade": cidade,
+                "UF": uf,
+                "Região": f"{bairro} • {cidade} - {uf}",
                 "Combustível": nome_combustivel(item),
                 "Combustível técnico": item,
                 "Preço": float(preco),
@@ -81,10 +85,38 @@ def carregar_ranking(produto: str) -> pd.DataFrame:
     return pd.DataFrame(registros)
 
 
-df = carregar_ranking(combustivel)
+df_base = carregar_ranking("TODOS")
+
+if df_base.empty:
+    st.warning("Ranking ainda não carregado no Redis.")
+    st.stop()
+
+
+cidades_disponiveis = sorted(df_base["Cidade"].dropna().unique().tolist())
+
+cidade_selecionada = st.sidebar.selectbox(
+    "Cidade",
+    ["Todas"] + cidades_disponiveis,
+    index=0
+)
+
+combustivel = st.sidebar.selectbox(
+    "Produto",
+    combustiveis,
+    format_func=nome_combustivel
+)
+
+
+df = df_base.copy()
+
+if cidade_selecionada != "Todas":
+    df = df[df["Cidade"] == cidade_selecionada]
+
+if combustivel != "TODOS":
+    df = df[df["Combustível técnico"] == combustivel]
 
 if df.empty:
-    st.warning("Ranking ainda não carregado no Redis.")
+    st.warning("Nenhum registro encontrado para os filtros selecionados.")
     st.stop()
 
 
@@ -94,13 +126,14 @@ df["Preço BRL"] = df["Preço"].apply(moeda_brl)
 menor = df["Preço"].min()
 media = df["Preço"].mean()
 maior = df["Preço"].max()
-economia = ((media - menor) / media) * 100
+economia = ((media - menor) / media) * 100 if media > 0 else 0
 
 menor_row = df.loc[df["Preço"].idxmin()]
 maior_row = df.loc[df["Preço"].idxmax()]
 
 df["diff_media"] = (df["Preço"] - media).abs()
 media_row = df.loc[df["diff_media"].idxmin()]
+
 
 k1, k2, k3, k4 = st.columns(4)
 
@@ -192,7 +225,7 @@ with col_left:
 with col_right:
     st.subheader("📊 Comparativo executivo")
 
-    if combustivel == "TODOS":
+    if cidade_selecionada == "Todas":
         comparativo = (
             df.groupby("Combustível", as_index=False)
             .agg(
@@ -205,35 +238,55 @@ with col_right:
             .reset_index(drop=True)
         )
 
-        comparativo["Preço médio"] = comparativo["preco_medio"].apply(moeda_brl)
+        comparativo["economia_potencial"] = (
+            ((comparativo["preco_medio"] - comparativo["menor_preco"])
+             / comparativo["preco_medio"]) * 100
+        )
 
-        fig = px.bar(
+        comparativo["Preço médio"] = comparativo["preco_medio"].apply(moeda_brl)
+        comparativo["Menor preço"] = comparativo["menor_preco"].apply(moeda_brl)
+        comparativo["Maior preço"] = comparativo["maior_preco"].apply(moeda_brl)
+        comparativo["Economia potencial"] = comparativo["economia_potencial"].apply(percentual)
+
+        fig = px.scatter(
             comparativo,
             x="preco_medio",
             y="Combustível",
-            orientation="h",
-            color="preco_medio",
+            size="postos",
+            color="economia_potencial",
             text="Preço médio",
             color_continuous_scale=[
-                [0.0, "#fee2e2"],
-                [0.35, "#fb7185"],
-                [0.70, "#ef4444"],
-                [1.0, "#7f1d1d"],
+                [0.0, "#dbeafe"],
+                [0.35, "#93c5fd"],
+                [0.70, "#f97316"],
+                [1.0, "#dc2626"],
             ],
             hover_data={
-                "menor_preco": ":.2f",
-                "preco_medio": ":.2f",
-                "maior_preco": ":.2f",
+                "Menor preço": True,
+                "Preço médio": True,
+                "Maior preço": True,
+                "Economia potencial": True,
                 "postos": True,
-                "Preço médio": False,
+                "preco_medio": False,
+                "menor_preco": False,
+                "maior_preco": False,
+                "economia_potencial": False,
             },
-            title="Preço médio por combustível"
+            title="Preço médio, volume e oportunidade por combustível"
+        )
+
+        fig.update_traces(
+            textposition="middle right",
+            marker=dict(
+                opacity=0.88,
+                line=dict(width=0)
+            )
         )
 
         fig.update_layout(
             xaxis_title="Preço médio em R$",
             yaxis_title="Combustível",
-            coloraxis_colorbar_title="Preço médio"
+            coloraxis_colorbar_title="Economia potencial",
         )
 
         fig.update_yaxes(
@@ -241,85 +294,119 @@ with col_right:
             categoryarray=comparativo["Combustível"].tolist()
         )
 
+        legenda_html = """
+        <div class="insight-card" style="margin-top:10px;">
+            <div class="insight-title">Como ler este gráfico</div>
+            <p class="insight-text">
+                <strong>Mais à direita:</strong> combustível com maior preço médio.
+                <br>
+                <strong>Bolha maior:</strong> maior quantidade de postos analisados.
+                <br>
+                <strong>Cor mais quente:</strong> maior economia potencial entre o menor preço e a média.
+            </p>
+        </div>
+        """
+
     else:
         comparativo = (
-            df.groupby("UF", as_index=False)
+            df.groupby(["Região", "Combustível"], as_index=False)
             .agg(
-                menor_preco=("Preço", "min"),
                 preco_medio=("Preço", "mean"),
+                menor_preco=("Preço", "min"),
                 maior_preco=("Preço", "max"),
                 postos=("Posto", "count")
             )
             .sort_values("preco_medio", ascending=False)
+            .head(30)
             .reset_index(drop=True)
         )
 
         comparativo["Preço médio"] = comparativo["preco_medio"].apply(moeda_brl)
+        comparativo["Menor preço"] = comparativo["menor_preco"].apply(moeda_brl)
+        comparativo["Maior preço"] = comparativo["maior_preco"].apply(moeda_brl)
 
-        fig = px.bar(
+        fig = px.scatter(
             comparativo,
-            x="preco_medio",
-            y="UF",
-            orientation="h",
+            x="Região",
+            y="Combustível",
+            size="postos",
             color="preco_medio",
             text="Preço médio",
             color_continuous_scale=[
-                [0.0, "#fee2e2"],
-                [0.35, "#fb7185"],
-                [0.70, "#ef4444"],
-                [1.0, "#7f1d1d"],
+                [0.0, "#dbeafe"],
+                [0.35, "#93c5fd"],
+                [0.70, "#f97316"],
+                [1.0, "#dc2626"],
             ],
             hover_data={
-                "menor_preco": ":.2f",
-                "preco_medio": ":.2f",
-                "maior_preco": ":.2f",
+                "Região": True,
+                "Combustível": True,
+                "Menor preço": True,
+                "Preço médio": True,
+                "Maior preço": True,
                 "postos": True,
-                "Preço médio": False,
+                "preco_medio": False,
+                "menor_preco": False,
+                "maior_preco": False,
             },
-            title=f"Preço médio por UF — {nome_combustivel(combustivel)}"
+            title=f"Preço médio por região — {cidade_selecionada}"
+        )
+
+        fig.update_traces(
+            textposition="top center",
+            marker=dict(
+                opacity=0.88,
+                line=dict(width=0)
+            )
         )
 
         fig.update_layout(
-            xaxis_title="Preço médio em R$",
-            yaxis_title="UF",
-            coloraxis_colorbar_title="Preço médio"
+            xaxis_title="Regiões",
+            yaxis_title="Combustível",
+            coloraxis_colorbar_title="Preço médio",
         )
 
-        fig.update_yaxes(
-            categoryorder="array",
-            categoryarray=comparativo["UF"].tolist()
-        )
-
-    fig.update_traces(
-        textposition="outside",
-        cliponaxis=False,
-        marker_line_width=0,
-        opacity=0.96
-    )
+        legenda_html = """
+        <div class="insight-card" style="margin-top:10px;">
+            <div class="insight-title">Como ler este gráfico</div>
+            <p class="insight-text">
+                <strong>Eixo X:</strong> regiões da cidade selecionada.
+                <br>
+                <strong>Eixo Y:</strong> tipo de combustível.
+                <br>
+                <strong>Bolha maior:</strong> mais postos analisados naquela região.
+                <br>
+                <strong>Cor mais quente:</strong> preço médio mais alto.
+            </p>
+        </div>
+        """
 
     fig.update_layout(
         template="plotly_dark",
-        height=430,
-        margin=dict(l=0, r=40, t=50, b=0),
+        height=470,
+        margin=dict(l=0, r=40, t=55, b=115),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         font=dict(color="#e5e7eb"),
-        coloraxis_showscale=False,
-        bargap=0.28
+        coloraxis_showscale=True
     )
 
     fig.update_xaxes(
         showgrid=True,
-        gridcolor="rgba(148,163,184,0.18)",
-        zeroline=False
+        gridcolor="rgba(148,163,184,0.12)",
+        zeroline=False,
+        tickangle=-35
     )
 
     fig.update_yaxes(
-        showgrid=False,
+        showgrid=True,
+        gridcolor="rgba(148,163,184,0.12)",
         zeroline=False
     )
 
     st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown(legenda_html, unsafe_allow_html=True)
 
 
 st.markdown("---")
@@ -356,7 +443,7 @@ with i3:
     <div class="insight-card">
         <div class="insight-title">⚡ Consulta crítica</div>
         <p class="insight-text">
-            Ranking por combustível e região deve ser servido pelo Redis para resposta imediata.
+            Ranking por combustível, cidade e região é servido pelo Redis para resposta imediata.
         </p>
     </div>
     """, unsafe_allow_html=True)
@@ -367,6 +454,7 @@ st.subheader("📋 Tabela executiva de preços")
 tabela = df[[
     "Posto",
     "Bandeira",
+    "Bairro",
     "Cidade",
     "UF",
     "Região",
